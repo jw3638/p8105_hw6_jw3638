@@ -191,7 +191,7 @@ Load and clean birthweight data
 bw_df <- 
   read_csv("data/birthweight.csv") |>
   rename(
-    mom_delwt      = delwt,
+    mom_delwt      = delwt, 
     family_income  = fincome,
     mom_ppbmi      = ppbmi,
     mom_ppwt       = ppwt,
@@ -213,6 +213,7 @@ bw_df <-
   )
 
 ```
+I renamed the variables mainly for clarity and my own ease of interpretation before I fitted my a regression. Adding "mom" to "delwt" for example helps me realize that it's mother’s delivery weight. "Prev_babie"s" is more intuitive to me than "parity." This makes the regression formula becomes much more understandable.
 
 Check what's missing
 ```{r}
