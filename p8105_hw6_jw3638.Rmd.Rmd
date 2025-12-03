@@ -1,0 +1,356 @@
+---
+title: "p8105_hw6_jw3638.Rmd"
+output: github_document
+---
+Load packages
+```{r}
+library(tidyverse)
+library(broom)
+library(purrr)
+```
+
+# Problem 1
+Import and clean the dataset
+```{r}
+homicide_df <- 
+  read_csv("data/homicide-data.csv") |>
+  transmute(
+    city_state   = str_c(city, state, sep = ", "),
+    resolved     = case_when(disposition == "Closed by arrest" ~ 1,
+                             TRUE ~ 0),
+    victim_age   = suppressWarnings(as.numeric(victim_age)),
+    victim_sex,
+    victim_race
+  ) |>
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ",
+                        "Kansas City, MO", "Tulsa, AL"))
+  ) |>
+  filter(victim_race %in% c("White", "Black"),
+         !is.na(victim_age))
+```
+
+Check that the cities were removed.
+```{r}
+homicide_df |> count(city_state)
+```
+
+Fit Baltimore logistic regression
+```{r}
+baltimore_model <- 
+  glm(
+    resolved ~ victim_age + victim_sex + victim_race,
+    data = homicide_df |> filter(city_state == "Baltimore, MD"),
+    family = binomial()
+  )
+
+# Extract OR and CI for male victims
+broom::tidy(baltimore_model, exponentiate = TRUE, conf.int = TRUE) |>
+  filter(term == "victim_sexMale") |>
+  select(term, OR = estimate, lower = conf.low, upper = conf.high)
+```
+
+Fit Logistic regression for each city
+```{r}
+city_results <- 
+  homicide_df |>
+  nest(by_city = -city_state) |>
+  mutate(
+    fit = map(by_city, ~ glm(resolved ~ victim_age + victim_sex + victim_race,
+                             data = .x, family = binomial())),
+    tidy_fit = map(fit, ~ broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE))
+  ) |>
+  unnest(tidy_fit) |>
+  filter(term == "victim_sexMale") |>
+  rename(
+    OR = estimate,
+    CI_low = conf.low,
+    CI_high = conf.high
+  ) |>
+  arrange(OR)
+
+```
+
+Plot adjusted ORs by city:
+```{r, fig.height = 12, fig.width = 8}
+city_results |>
+  mutate(city_state = fct_reorder(city_state, OR)) |>
+  ggplot(aes(y = city_state, x = OR)) +
+  geom_point(size = 2) +
+  geom_errorbarh(aes(xmin = CI_low, xmax = CI_high), height = 0.15) +
+  geom_vline(xintercept = 1, color = "gray40", linetype = "dotted") +
+  labs(
+    title = "Adjusted Odds Ratio for Solved Homicides: Male vs Female Victims",
+    x = "Odds Ratio (adjusted for age & race)",
+    y = "City"
+  ) +
+  theme_minimal()
+```
+Most cities show odds ratios below 1, meaning homicides with male victims are generally less likely to be solved than those with female victims. A few cities have ORs above 1, but the confidence intervals are wide, so the estimates aren’t very reliable. Overall, there’s a lot of variation from city to city, and many places have pretty imprecise results—likely because they don’t have a ton of cases. In most cities, the estimated odds ratio for male victims is below 1, suggesting that homicides involving male victims are solved less often than those involving female victims.
+
+# Problem 2
+
+Load packages
+```{r}
+library(p8105.datasets)
+
+data("weather_df")
+```
+
+Create bootstrap function
+```{r}
+make_boot <- function(data) {
+  data |> slice_sample(prop = 1, replace = TRUE)
+}
+```
+
+Create the 5000 bootstrap samples and fit the models
+```{r}
+set.seed(42)
+
+boot_df <- 
+  tibble(id = 1:5000) |>
+  mutate(
+    boot_data = map(id, ~ make_boot(weather_df)),
+    model_fit = map(boot_data, ~ lm(tmax ~ tmin + prcp, data = .x))
+  )
+```
+
+Extract R squared and β1/β2
+```{r}
+boot_stats <- 
+  boot_df |>
+  mutate(
+    r_sq = map_dbl(model_fit, ~ glance(.x)$r.squared),
+    
+    coef_table = map(model_fit, tidy),
+    
+    beta_ratio = map_dbl(coef_table, ~ {
+      coefs <- .x |> 
+        filter(term %in% c("tmin", "prcp")) |> 
+        pull(estimate)
+      coefs[1] / coefs[2]   
+    })
+  )
+```
+
+Plot distributions
+```{r}
+# R squared
+boot_stats |>
+  ggplot(aes(x = r_sq)) +
+  geom_density(fill = "blue", alpha = 0.4) +
+  labs(
+    title = "Bootstrap Distribution of R-squared",
+    x = "R-squared"
+  )
+
+# β1/β2
+boot_stats |>
+  ggplot(aes(x = beta_ratio)) +
+  geom_density(fill = "red", alpha = 0.4) +
+  labs(
+    title = "Bootstrap Distribution of β1 / β2",
+    x = "β1 / β2"
+  )
+```
+The bootstrap distribution for R squared is tightly centered around 0.94, with almost all values falling between about 0.93 and 0.95. The shape is smooth and roughly symmetric, showing that the model’s explanatory power is very stable across bootstrap samples. This makes sense because tmin alone is a very strong predictor of tmax, so resampling doesn’t change the fit much.
+
+The bootstrap distribution for β1/β2 is entirely negative and much more spread out. Most estimates fall between about –300 and –125, with a long tail extending further left.The shape is right-skewed, reflecting occasional bootstrap samples where β₂ is especially small in magnitude.
+
+
+Bootstrap 95% CI for R squared
+```{r}
+boot_stats |>
+  summarize(
+    low = quantile(r_sq, 0.025),
+    high = quantile(r_sq, 0.975)
+  )
+```
+The 95% CI for R squared is (0.934, 0.947), meaning the model consistently explains about 93–95% of the variation in maximum temperature.
+
+Bootstrap 95% CI for β1/β2
+```{r}
+boot_stats |>
+  summarize(
+    low = quantile(beta_ratio, 0.025),
+    high = quantile(beta_ratio, 0.975)
+  )
+```
+The 95% CI for B1/B2 is (-278, -126), indicating that the ratio is consistently large and negative. Although wide, the CI does not cross 0, so the ratio is consistently negative.
+
+# Problem 3
+Load packages
+```{r}
+library(modelr)
+```
+
+
+Load and clean birthweight data
+```{r}
+bw_df <- 
+  read_csv("data/birthweight.csv") |>
+  rename(
+    mom_delwt      = delwt,
+    family_income  = fincome,
+    mom_ppbmi      = ppbmi,
+    mom_ppwt       = ppwt,
+    smoke_per_day  = smoken,
+    wt_gain        = wtgain,
+    prev_babies    = parity,
+    prev_lbw       = pnumlbw,
+    prev_sga       = pnumsga
+  ) |>
+  mutate(
+    babysex = factor(babysex, labels = c("male", "female")),
+    malform = factor(malform, labels = c("absent", "present")),
+    frace   = factor(frace,
+                     levels = c(1,2,3,4,8,9),
+                     labels = c("White","Black","Asian","Puerto Rican","Other","Unknown")),
+    mrace   = factor(mrace,
+                     levels = c(1,2,3,4,8),
+                     labels = c("White","Black","Asian","Puerto Rican","Other"))
+  )
+
+```
+
+Check what's missing
+```{r}
+colSums(is.na(bw_df))
+```
+Because it's all zeros, no changes are needed.
+
+Check for multicollinearity
+```{r}
+full_test_model <- lm(
+  bwt ~ bhead + blength + gaweeks +
+    mom_ppbmi + mom_ppwt + wt_gain +
+    momage + smoke_per_day + family_income +
+    babysex + mrace +
+    prev_babies + prev_lbw + prev_sga,
+  data = bw_df
+)
+
+summary(full_test_model)
+```
+When fitting a model that included prev_lbw and prev_sga they showed "NA" for  singularities/rank-deficiency, indicating multicollinearity, so I excluded these variables from the final model.
+
+For my main model, I selected predictors that are relevant to birthweight, including head circumference, length, gestational age, and sex, maternal health measures pre-pregnancy BMI and weight, weight gain during pregnancy, smoking, age, maternal race and family income. I removed variables that introduced multicollinearity, including the counts of previous low-birth-weight (prev_lbw) and SGA births (prev_sga).
+
+Fit the model
+```{r}
+main_model <- 
+  lm(bwt ~ bhead + blength + gaweeks +
+        mom_ppbmi + mom_ppwt + wt_gain +
+        momage + smoke_per_day + family_income +
+        babysex + mrace + prev_babies,
+     data = bw_df)
+```
+
+Residual plot
+```{r}
+bw_resids <- 
+  bw_df |>
+  add_predictions(main_model) |>
+  add_residuals(main_model)
+
+bw_resids |>
+  ggplot(aes(pred, resid)) +
+  geom_point(alpha = 0.4) +
+  geom_hline(yintercept = 0, color = "red") +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Predicted birthweight",
+    y = "Residuals"
+  )
+```
+The residuals are mostly centered around zero with a pretty random scatter, suggesting the model fits reasonably well. There’s a bit more spread at higher predicted birthweights, but nothing severe.
+
+Comparison to 2 alternative models:
+1. Main effects only
+```{r}
+model_simple <- function(df) {
+  lm(bwt ~ blength + gaweeks, data = df)
+}
+```
+
+2. Three-way interaction
+```{r}
+model_inter <- function(df) {
+  lm(bwt ~ bhead * blength * babysex, data = df)
+}
+```
+
+Main model
+```{r}
+model_main <- function(df) {
+  lm(bwt ~ bhead + blength + gaweeks +
+        mom_ppbmi + mom_ppwt + wt_gain +
+        momage + smoke_per_day + family_income +
+        babysex + mrace + prev_babies,
+     data = df)
+}
+```
+
+Monte Carlo Cross-Validation
+```{r}
+set.seed(1)
+cv <- crossv_mc(bw_df, 1000) |>  
+  mutate(
+    train = map(train, as_tibble),
+    test  = map(test, as_tibble),
+    fit_main   = map(train, model_main),
+    fit_simple = map(train, model_simple),
+    fit_inter  = map(train, model_inter),
+    rmse_main   = map2_dbl(fit_main,   test, ~ rmse(.x, .y)),
+    rmse_simple = map2_dbl(fit_simple, test, ~ rmse(.x, .y)),
+    rmse_inter  = map2_dbl(fit_inter,  test, ~ rmse(.x, .y))
+  )
+```
+
+Compare RMSEs
+```{r}
+cv_summary <-
+  cv |> summarise(
+    main_rmse   = mean(rmse_main),
+    simple_rmse = mean(rmse_simple),
+    inter_rmse  = mean(rmse_inter)
+  )
+
+cv_summary
+```
+
+Violin plot: RMSE distributions
+```{r}
+cv |> 
+  select(starts_with("rmse_")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  mutate(
+    model = recode(model,
+                   "main"   = "Proposed model",
+                   "simple" = "Length + GA",
+                   "inter"  = "Head × length × sex")
+  ) |>
+  ggplot(aes(model, rmse, fill = model)) +
+  geom_violin(alpha = 0.6) +
+  geom_boxplot(width = 0.2, alpha = 0.9) +
+  labs(
+    title = "Cross-Validated RMSE for Competing Birthweight Models",
+    x = "Model",
+    y = "RMSE (grams)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+The cross-validated RMSE values show clear differences in predictive accuracy across the three models.
+
+In my proposed model, the lowest RMSE  is ~274 g, meaning it predicts birthweight most accurately.
+
+The head circumference, length, sex, and all interactions model' performs moderately well's RMSE = ~289 g, which is better than the main effects only model, but worse than my proposed model.
+
+The main effects only (length at birth and gestational age as predictors) has the highest RMSE, (~333 g, indicating it captures the least variation in birthweight (and is therefore the worst fit model for the data).
